@@ -1,497 +1,639 @@
-# YOLO Camera Dashboard (Rust)
+# YOLO V4L2 ONNX Dashboard (Rust)
 
-**Languages / Idiomes:**
+[![Rust](https://img.shields.io/badge/Rust-2021-black)](https://www.rust-lang.org/)
+[![Axum](https://img.shields.io/badge/Axum-0.7-blue)](https://github.com/tokio-rs/axum)
+[![ONNX Runtime](https://img.shields.io/badge/ONNX%20Runtime-ort%202.0.0--rc.11-green)](https://github.com/pykeio/ort)
+[![License](https://img.shields.io/badge/License-TBD-lightgrey)](#license)
 
-* [Español](#español)
-* [English](#english)
-* [Català](#català)
-
----
-
-## Español
-
-### Visión general
-
-**YOLO Camera Dashboard** es una aplicación en Rust que combina:
-
-* Captura de vídeo desde cámaras **V4L2** (Linux)
-* Inferencia **YOLO en ONNX Runtime** (con soporte CUDA si está disponible)
-* Un dashboard web servido por **Axum** con streaming por **WebSocket**
-* (Opcional) **Narración por voz**: un VLM en **Ollama (Moondream)** describe la escena y **Piper TTS** la lee por altavoz
-
-El servidor se levanta por defecto en `http://0.0.0.0:8090` y sirve el frontend desde `./static`. 
+**Repo sugerido:** `yolo-v4l2-onnx-dashboard`  
+**Crate:** `yolo_backend_hex`
 
 ---
 
-### Qué puedes hacer con este proyecto
+## ES — Español
 
-| Capacidades                    | Detalles                                                                                            |
-| ------------------------------ | --------------------------------------------------------------------------------------------------- |
-| Detección en tiempo real       | Inferencia YOLO sobre el frame actual, con umbrales configurables (conf / IoU / tamaño de entrada)  |
-| Dashboard web                  | Control de cámara + selección de modelo ONNX + overlay de detecciones + métricas (ms/FPS)           |
-| Pipeline “hot reload”          | Cambia cámara / formato / modelo y el worker recarga recursos automáticamente                       |
-| Narración opcional (VLM + TTS) | Moondream (Ollama) genera una frase corta y Piper la reproduce con `aplay`                          |
+### Qué es
+Aplicación en **Rust** con arquitectura **hexagonal** (Domain + Application + Adapters) que:
 
----
+- Captura vídeo desde cámara **V4L2** (Linux).
+- Ejecuta inferencia **YOLO en ONNX Runtime** (CPU o GPU CUDA si está disponible).
+- Publica un **dashboard web** (UI estática) con:
+  - streaming por **WebSocket** (JPEG + metadatos JSON),
+  - configuración dinámica de cámara e inferencia,
+  - explorador de archivos para seleccionar modelos `.onnx`.
+- (Opcional) Narra una descripción breve de la escena usando **Ollama (moondream:latest)** y **Piper TTS**.
 
-### Arquitectura
-
-El proyecto sigue un enfoque **hexagonal**: `domain` (modelos y reglas), `application` (casos de uso/puertos), `adapters` (infraestructura: V4L2/ONNX/HTTP).
-
+### Arquitectura (Mermaid — compatible con GitHub)
 ```mermaid
 flowchart LR
-  UI[Web UI (static/)] <-- WebSocket + REST --> HTTP[Axum HTTP Adapter]
-  HTTP --> APP[Application Services]
-  APP -->|ports| DOM[Domain]
-  APP --> V4L2[V4L2 Adapter]
-  APP --> ONNX[ONNX Adapter]
-  ONNX --> ORT[ONNX Runtime]
-  APP --> PIPE[Pipeline Worker]
-  PIPE --> SPEECH[SpeechService (opcional)]
-  SPEECH --> OLLAMA[Ollama (moondream)]
-  SPEECH --> PIPER[Piper TTS + aplay]
-```
+  UI["Web UI (static/)"]
+  HTTP["Axum HTTP Adapter"]
+  APP["Application Services"]
+  DOM["Domain"]
+  V4L2["V4L2 Adapter"]
+  ONNX["ONNX Adapter"]
+  ORT["ONNX Runtime"]
+  PIPE["Pipeline Worker"]
+  SPEECH["SpeechService (optional)"]
+  OLLAMA["Ollama - moondream:latest"]
+  PIPER["Piper TTS + aplay"]
 
-El **Pipeline Worker** corre en un hilo dedicado: captura frame, ejecuta inferencia, publica metadatos + JPEG por un canal broadcast para los clientes WebSocket, y opcionalmente alimenta el servicio de voz.
-
----
-
-### Requisitos
-
-**Sistema**
-
-* Linux con **V4L2** (cámaras en `/dev/video*`)
-* Rust (stable)
-* Recomendado: GPU NVIDIA + drivers si quieres acelerar con CUDA (el proyecto compila con soporte CUDA en ONNX Runtime). 
-
-**Audio (solo si activas narración)**
-
-* `aplay` (paquete `alsa-utils` en muchas distros) 
+  UI <--> |"REST + WS"| HTTP
+  HTTP --> APP
+  APP --> DOM
+  APP --> V4L2
+  APP --> ONNX
+  ONNX --> ORT
+  APP --> PIPE
+  PIPE --> SPEECH
+  SPEECH --> OLLAMA
+  SPEECH --> PIPER
+````
 
 ---
 
-### Instalación y ejecución
+## Requisitos
+
+### Sistema
+
+* Linux con **V4L2** (cámaras típicamente en `/dev/video*`).
+* `alsa-utils` (para `aplay`) si quieres voz.
+* Rust toolchain (stable).
+
+### Dependencias clave (incluidas vía Cargo)
+
+* `axum` (REST + WebSocket)
+* `tower-http` (CORS, trazas, estáticos)
+* `v4l` (captura V4L2)
+* `ort` (ONNX Runtime; con `download-binaries` y `cuda`)
+* `image`, `ndarray`, `reqwest`, `serde`
+
+> Nota ONNX Runtime: el crate `ort` usa `download-binaries`, por lo que en la mayoría de entornos no necesitas instalar ONNX Runtime del sistema. Para CUDA, sí necesitarás stack NVIDIA/CUDA compatible.
+
+---
+
+## Modelos: qué se usa y cómo instalar/descargar
+
+### 1) Modelo YOLO en ONNX (`.onnx`)
+
+El backend espera un archivo ONNX (por ejemplo `models/yolo11n.onnx`, o cualquier otro `.onnx` compatible con la salida esperada).
+
+**Opción A — Exportar desde Ultralytics (recomendado)**
+
+1. Instala Ultralytics:
+
+   ```bash
+   python3 -m pip install -U ultralytics
+   ```
+2. Exporta a ONNX:
+
+   ```bash
+   yolo export model=yolo11n.pt format=onnx imgsz=640
+   ```
+3. Copia el `.onnx` a una ruta local (p.ej. `./models/yolo11n.onnx`) y selecciónalo desde el explorador del dashboard.
+
+**Opción B — Usar un `.onnx` ya exportado**
+
+* Coloca el archivo `.onnx` en el host y apunta a su ruta con el explorador (`/api/files`) o la API (`/api/config`).
+
+**Clases**
+
+* El motor incluye una lista de clases tipo **COCO** en español (p.ej. “persona”, “coche”, “perro”…). Si tu `.onnx` es de otro dataset, deberás adaptar labels en el motor.
+
+---
+
+### 2) VLM opcional: Ollama + `moondream:latest`
+
+Si activas el flujo de voz (está integrado en el pipeline), el sistema:
+
+* Verifica Ollama en `http://localhost:11434/api/tags`
+* Envía frames JPEG a `http://localhost:11434/api/generate`
+* Usa `model = "moondream:latest"` y un prompt corto para describir la imagen
+
+**Instalar Ollama (Linux)**
 
 ```bash
-# 1) Compilar
-cargo build --release
-
-# 2) Ejecutar
-cargo run --release
-```
-
-Abre el dashboard en:
-
-```text
-http://localhost:8090
-```
-
-(El servidor escucha en `0.0.0.0:8090` por defecto). 
-
----
-
-## Modelos: qué se usa y cómo instalarlos en el host
-
-Este repositorio trabaja con **tres familias** de modelos:
-
-1. **YOLO (detección) en formato ONNX**
-2. **Moondream (VLM) en Ollama** (opcional, narración)
-3. **Piper TTS** + **modelo de voz** (opcional, narración)
-
----
-
-### 1) YOLO ONNX (detección)
-
-El catálogo de modelos ONNX busca ficheros `.onnx` (p. ej. en `./models`) y valida su existencia antes de configurar el pipeline.
-
-**Configuración por defecto**: el servidor anuncia/propone un `models/yolo11n.onnx` con parámetros típicos (tamaño de entrada y umbrales). 
-
-#### Opción A (recomendada): exportar a ONNX con Ultralytics
-
-Ultralytics documenta el modo *export* para generar ONNX desde un modelo YOLO. ([Ultralytics Docs][1])
-
-Ejemplo en el host:
-
-```bash
-# Crear venv (opcional)
-python3 -m venv .venv
-source .venv/bin/activate
-
-# Instalar ultralytics
-pip install -U ultralytics
-
-# Exportar YOLO11n a ONNX (ajusta el nombre del modelo si usas otro)
-yolo export model=yolo11n.pt format=onnx imgsz=640
-```
-
-Luego coloca el ONNX en la carpeta esperada por el repo:
-
-```bash
-mkdir -p models
-mv yolo11n.onnx models/yolo11n.onnx
-```
-
-#### Opción B: usar un ONNX ya exportado
-
-Si ya tienes un `.onnx` compatible (exportado desde Ultralytics), guárdalo en `models/` o donde prefieras y selecciónalo desde el dashboard (el backend expone exploración/listado de ONNX).
-
----
-
-### 2) Moondream en Ollama (VLM, opcional)
-
-El servicio de voz llama a un endpoint local `http://localhost:11434/api/generate` y usa por defecto el modelo `moondream:latest` para producir una frase corta describiendo la imagen.
-
-**Instalar Ollama** (según documentación oficial): ([Ollama Documentation][2])
-
-```bash
-# Linux (ejemplo habitual)
 curl -fsSL https://ollama.com/install.sh | sh
 ```
 
-Descargar el modelo:
+**Arrancar servicio**
+
+```bash
+ollama serve
+```
+
+**Descargar el modelo**
 
 ```bash
 ollama pull moondream:latest
 ```
 
-Verificación rápida:
+> Nota: el código usa `http://localhost:11434` y `moondream:latest` (hard-coded). Si necesitas parametrizar host/modelo, la mejora natural es exponerlo en configuración.
+
+---
+
+### 3) TTS opcional: Piper + `aplay`
+
+El ejecutable y el modelo de voz se esperan en:
+
+* `./piper_voice/piper/piper` (binario)
+* `./piper_voice/en_US-lessac-medium.onnx` (modelo de voz)
+
+**Instala el reproductor**
 
 ```bash
-ollama list
-curl -s http://localhost:11434/api/tags | head
+sudo apt-get update
+sudo apt-get install -y alsa-utils
 ```
 
----
+**Descarga Piper (binario)**
 
-### 3) Piper TTS + modelos de voz (opcional)
+* Descarga un release para Linux x64 desde el repositorio de Piper y descomprímelo.
+* Coloca el binario final en `./piper_voice/piper/piper` y asegúrate de que es ejecutable:
 
-El proyecto invoca un binario local en:
+  ```bash
+  chmod +x ./piper_voice/piper/piper
+  ```
 
-* `./piper_voice/piper/piper`
-* y un modelo de voz en:
+**Descarga una voz**
 
-  * `./piper_voice/en_US-lessac-medium.onnx` (por defecto en el código)
+* Descarga una voz ONNX (por ejemplo `en_US-lessac-medium.onnx`) y colócala en:
 
-Luego reproduce audio RAW con:
-
-```text
-aplay -r 22050 -f S16_LE -t raw
-```
-
-Todo esto está implementado en `SpeechService`.
-
-#### Descargar modelos de voz (ejemplo)
-
-Puedes obtener estos modelos desde repositorios públicos (p. ej., Hugging Face). ([Hugging Face][3])
-
-Ejemplo:
-
-```bash
-mkdir -p piper_voice
-
-# Modelo en inglés (ejemplo consistente con el código)
-wget -O piper_voice/en_US-lessac-medium.onnx \
-  "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx"
-
-# Modelo en español (si quieres extender el selector/uso en código)
-wget -O piper_voice/es_ES-sharvard-medium.onnx \
-  "https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_ES/sharvard/medium/es_ES-sharvard-medium.onnx"
-```
-
-#### Binario Piper
-
-Coloca el ejecutable en `piper_voice/piper/piper` (ajusta permisos):
-
-```bash
-chmod +x piper_voice/piper/piper
-```
+  ```text
+  ./piper_voice/en_US-lessac-medium.onnx
+  ```
 
 ---
 
-### Endpoints principales (backend)
+## Ejecución
 
-El backend expone una API REST y un WebSocket para el streaming de frames.
-
-* `GET /api/cameras` — lista cámaras
-* `GET /api/formats?camera_path=...` — formatos disponibles
-* `GET /api/controls?camera_path=...` — controles (exposición, ganancia, etc.)
-* `POST /api/controls` — aplicar controles
-* `GET /api/files?path=...` — explorador (útil para localizar `.onnx`)
-* `POST /api/pipeline` — configura cámara + modo + modelo
-* `GET /ws/stream` — WebSocket (metadatos + JPEG)
-
----
-
-### Troubleshooting (rápido y práctico)
-
-* **No veo cámaras**: verifica permisos sobre `/dev/video*` (grupos `video`/udev).
-* **El modelo no carga**: confirma que el `.onnx` existe y que la ruta coincide; el servicio valida el modelo antes de arrancar el hardware.
-* **No hay narración**:
-
-  * Ollama debe estar levantado y con `moondream:latest` disponible.
-  * Debe existir `piper_voice/en_US-lessac-medium.onnx` y `piper_voice/piper/piper`. 
-  * `aplay` debe estar instalado. 
-
----
-
-## English
-
-### Overview
-
-**YOLO Camera Dashboard** is a Rust application that combines:
-
-* **V4L2** camera capture (Linux)
-* **YOLO inference via ONNX Runtime** (CUDA-capable if available)
-* **Axum** backend serving a web dashboard + **WebSocket** streaming
-* (Optional) **Voice narration**: a VLM in **Ollama (Moondream)** describes the scene and **Piper TTS** speaks it
-
-The server runs on `http://0.0.0.0:8090` by default and serves the frontend from `./static`. 
-
----
-
-### Key features
-
-| Feature                        | Notes                                                               |
-| ------------------------------ | ------------------------------------------------------------------- |
-| Real-time detection            | YOLO ONNX inference with configurable thresholds and input size     |
-| Web dashboard                  | Camera controls + ONNX model selection + detection overlay + ms/FPS |
-| Hot reload pipeline            | Switch camera/format/model and the worker reloads automatically     |
-| Optional narration (VLM + TTS) | Moondream generates one short sentence, Piper plays it via `aplay`  |
-
----
-
-### Architecture (Hexagonal)
-
-The repo is structured around `domain` (models), `application` (use-cases/ports), and `adapters` (infra: V4L2/ONNX/HTTP).
-
-```mermaid
-flowchart LR
-  UI[Web UI (static/)] <-- WebSocket + REST --> HTTP[Axum HTTP Adapter]
-  HTTP --> APP[Application Services]
-  APP -->|ports| DOM[Domain]
-  APP --> V4L2[V4L2 Adapter]
-  APP --> ONNX[ONNX Adapter]
-  ONNX --> ORT[ONNX Runtime]
-  APP --> PIPE[Pipeline Worker]
-  PIPE --> SPEECH[SpeechService (optional)]
-  SPEECH --> OLLAMA[Ollama (moondream)]
-  SPEECH --> PIPER[Piper TTS + aplay]
-```
-
-The **Pipeline Worker** runs in its own thread: capture → infer → broadcast meta+JPEG to WebSocket clients; optionally feed the voice service.
-
----
-
-### Requirements
-
-* Linux + V4L2 cameras (`/dev/video*`)
-* Rust (stable)
-* Optional: NVIDIA drivers for CUDA acceleration. 
-* Optional audio: `aplay` (alsa-utils). 
-
----
-
-### Build & run
+### 1) Compilar
 
 ```bash
 cargo build --release
-cargo run --release
 ```
 
-Open:
-
-```text
-http://localhost:8090
-```
-
-Default bind: `0.0.0.0:8090`. 
-
----
-
-## Models: what’s used & how to install them on the host
-
-### 1) YOLO ONNX
-
-The model catalog expects `.onnx` files (commonly under `./models`) and validates them before configuring the pipeline.
-Default config suggests `models/yolo11n.onnx`. 
-
-**Recommended: export with Ultralytics**. ([Ultralytics Docs][1])
+### 2) Ejecutar
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -U ultralytics
-yolo export model=yolo11n.pt format=onnx imgsz=640
+RUST_LOG=info cargo run --release
+```
 
-mkdir -p models
-mv yolo11n.onnx models/yolo11n.onnx
+Por defecto:
+
+* Servidor: `http://0.0.0.0:8090`
+* UI estática servida desde: `./static`
+
+Abre en tu navegador:
+
+* `http://localhost:8090`
+
+---
+
+## API (REST)
+
+### GET `/api/cameras`
+
+Lista cámaras disponibles.
+
+### GET `/api/cameras/{index}/modes`
+
+Lista formatos / resoluciones / FPS soportados.
+
+### GET `/api/cameras/{index}/controls`
+
+Lee controles (exposición, ganancia, etc.).
+
+### POST `/api/cameras/{index}/controls`
+
+Actualiza controles.
+
+### GET `/api/config`
+
+Devuelve configuración por defecto (cámara + inferencia).
+
+### POST `/api/config`
+
+Configura pipeline (cámara + modelo + parámetros YOLO).
+
+**Ejemplo**
+
+```bash
+curl -X POST http://localhost:8090/api/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "camera_path": "/dev/video0",
+    "fourcc": "MJPG",
+    "width": 1280,
+    "height": 720,
+    "fps": 30,
+    "model_name": "yolo11n",
+    "onnx_path": "./models/yolo11n.onnx",
+    "yolo": {
+      "input_size": 640,
+      "conf_threshold": 0.25,
+      "iou_threshold": 0.45,
+      "max_detections": 100
+    }
+  }'
+```
+
+### GET `/api/files?path=...`
+
+Explorador de archivos para seleccionar `.onnx` desde la UI.
+
+---
+
+## Streaming (WebSocket)
+
+### WS `/ws/stream`
+
+El servidor envía, por cada frame, un par de mensajes:
+
+1. **Texto JSON** con metadatos:
+
+```json
+{
+  "type": "frame_meta",
+  "meta": {
+    "width": 1280,
+    "height": 720,
+    "infer_ms": 7.2,
+    "fps_est": 29.8,
+    "detections": [
+      {"x1": 10.0, "y1": 20.0, "x2": 200.0, "y2": 220.0, "score": 0.91, "class_id": 0, "label": "persona"}
+    ]
+  }
+}
+```
+
+2. **Binario** con el JPEG del frame.
+
+---
+
+## Seguridad y operación
+
+* Este proyecto sirve UI + API y expone un explorador de archivos. **No lo publiques tal cual en Internet** sin autenticación, control de rutas y endurecimiento (CORS, allowlist de directorios, etc.).
+* Si abres `0.0.0.0:8090` en una LAN, cualquiera en la red podría acceder.
+
+---
+
+## Roadmap sugerido
+
+* Parametrizar `OLLAMA_URL`, `MODEL_NAME` y rutas de Piper por configuración.
+* Añadir autenticación (token) y allowlist de rutas para `/api/files`.
+* Hacer hot-reload seguro del modelo ONNX (pool/arc swap).
+* Métricas Prometheus (fps, infer_ms, dropped frames).
+
+---
+
+## Contribuir
+
+PRs y issues son bienvenidos. Si propones cambios, intenta mantener:
+
+* Dominio sin dependencias de infraestructura
+* Servicios de aplicación como casos de uso
+* Adaptadores aislando V4L2 / ONNX / HTTP
+
+---
+
+## License
+
+MIT
+
+---
+
+---
+
+## EN — English
+
+### What this is
+
+A **Rust** application with **hexagonal architecture** (Domain + Application + Adapters) that:
+
+* Captures video from **V4L2** cameras (Linux).
+* Runs **YOLO inference in ONNX Runtime** (CPU or CUDA GPU when available).
+* Serves a **web dashboard** (static UI) with:
+
+  * **WebSocket** streaming (JPEG + JSON metadata),
+  * live camera + inference configuration,
+  * file browser for selecting `.onnx` models.
+* (Optional) Speaks a short scene description using **Ollama (moondream:latest)** + **Piper TTS**.
+
+### Architecture (Mermaid — GitHub compatible)
+
+```mermaid
+flowchart LR
+  UI["Web UI (static/)"]
+  HTTP["Axum HTTP Adapter"]
+  APP["Application Services"]
+  DOM["Domain"]
+  V4L2["V4L2 Adapter"]
+  ONNX["ONNX Adapter"]
+  ORT["ONNX Runtime"]
+  PIPE["Pipeline Worker"]
+  SPEECH["SpeechService (optional)"]
+  OLLAMA["Ollama - moondream:latest"]
+  PIPER["Piper TTS + aplay"]
+
+  UI <--> |"REST + WS"| HTTP
+  HTTP --> APP
+  APP --> DOM
+  APP --> V4L2
+  APP --> ONNX
+  ONNX --> ORT
+  APP --> PIPE
+  PIPE --> SPEECH
+  SPEECH --> OLLAMA
+  SPEECH --> PIPER
 ```
 
 ---
 
-### 2) Moondream via Ollama (optional)
+## Requirements
 
-The voice service calls `http://localhost:11434/api/generate` using `moondream:latest`.
-Install Ollama (official): ([Ollama Documentation][2])
+### System
+
+* Linux with **V4L2** (typically `/dev/video*`).
+* `alsa-utils` (`aplay`) if you want voice output.
+* Rust toolchain (stable).
+
+### Key dependencies (via Cargo)
+
+* `axum` (REST + WebSocket)
+* `tower-http` (CORS, tracing, static files)
+* `v4l` (V4L2 capture)
+* `ort` (ONNX Runtime; `download-binaries` + `cuda`)
+* `image`, `ndarray`, `reqwest`, `serde`
+
+> ONNX Runtime note: with `download-binaries`, system-wide ORT is usually not required. CUDA needs a compatible NVIDIA/CUDA stack.
+
+---
+
+## Models: what’s used and how to install/download
+
+### 1) YOLO ONNX model (`.onnx`)
+
+The backend expects a YOLO ONNX file (e.g. `./models/yolo11n.onnx`) compatible with the runtime output the engine parses.
+
+**Option A — Export with Ultralytics (recommended)**
+
+```bash
+python3 -m pip install -U ultralytics
+yolo export model=yolo11n.pt format=onnx imgsz=640
+```
+
+**Option B — Use a pre-exported `.onnx`**
+Place the `.onnx` on disk and select it via the UI file browser (`/api/files`) or POST `/api/config`.
+
+**Classes**
+The engine ships with a **COCO-like** label list (Spanish strings). If your model uses a different dataset, update labels in the engine.
+
+---
+
+### 2) Optional VLM: Ollama + `moondream:latest`
+
+The speech pipeline checks:
+
+* `http://localhost:11434/api/tags`
+  and sends frames to:
+* `http://localhost:11434/api/generate`
+
+**Install Ollama (Linux)**
 
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
+```
+
+**Start the daemon**
+
+```bash
+ollama serve
+```
+
+**Pull the model**
+
+```bash
 ollama pull moondream:latest
 ```
 
 ---
 
-### 3) Piper TTS + voice model (optional)
+### 3) Optional TTS: Piper + `aplay`
 
-The code runs:
+Expected paths:
 
 * `./piper_voice/piper/piper`
-* with voice model `./piper_voice/en_US-lessac-medium.onnx`
-* then plays raw audio via `aplay`. 
+* `./piper_voice/en_US-lessac-medium.onnx`
 
-Example voice downloads (Hugging Face): ([Hugging Face][3])
+Install audio playback:
 
 ```bash
-mkdir -p piper_voice
+sudo apt-get update
+sudo apt-get install -y alsa-utils
+```
 
-wget -O piper_voice/en_US-lessac-medium.onnx \
-  "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx"
+Download Piper binary from releases, place it at `./piper_voice/piper/piper`, then:
 
-wget -O piper_voice/es_ES-sharvard-medium.onnx \
-  "https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_ES/sharvard/medium/es_ES-sharvard-medium.onnx"
+```bash
+chmod +x ./piper_voice/piper/piper
+```
 
-chmod +x piper_voice/piper/piper
+Download a voice ONNX model and place it at:
+
+```text
+./piper_voice/en_US-lessac-medium.onnx
 ```
 
 ---
 
-### Backend endpoints (main)
+## Run
 
-REST + WebSocket streaming are exposed.
+Build:
+
+```bash
+cargo build --release
+```
+
+Run:
+
+```bash
+RUST_LOG=info cargo run --release
+```
+
+Defaults:
+
+* Server: `http://0.0.0.0:8090`
+* Static UI: `./static`
+
+---
+
+## REST API
 
 * `GET /api/cameras`
-* `GET /api/formats?camera_path=...`
-* `GET /api/controls?camera_path=...`
-* `POST /api/controls`
+* `GET /api/cameras/{index}/modes`
+* `GET /api/cameras/{index}/controls`
+* `POST /api/cameras/{index}/controls`
+* `GET /api/config`
+* `POST /api/config` (configure pipeline)
 * `GET /api/files?path=...`
-* `POST /api/pipeline`
-* `GET /ws/stream`
 
 ---
 
-## Català
+## WebSocket stream
 
-### Visió general
+* `WS /ws/stream`
+  For each frame:
 
-**YOLO Camera Dashboard** és una aplicació en Rust que combina:
-
-* Captura de vídeo amb **V4L2** (Linux)
-* Inferència **YOLO amb ONNX Runtime** (amb suport CUDA si n’hi ha)
-* Backend **Axum** amb dashboard web i streaming per **WebSocket**
-* (Opcional) **Narració**: un VLM a **Ollama (Moondream)** descriu l’escena i **Piper TTS** la llegeix
-
-Servidor per defecte a `http://0.0.0.0:8090`, i frontend servit des de `./static`. 
+1. JSON text message with metadata
+2. binary JPEG payload
 
 ---
 
-### Funcionalitats
+## Security
 
-| Funcionalitat           | Detall                                                     |
-| ----------------------- | ---------------------------------------------------------- |
-| Detecció en temps real  | YOLO ONNX amb paràmetres configurables                     |
-| Dashboard web           | Controls de càmera, selecció de model, overlay i mètriques |
-| Hot reload del pipeline | En canviar càmera/model es recarreguen recursos            |
-| Narració opcional       | Moondream genera una frase curta i Piper la reprodueix     |
+Do not expose this as-is to the public Internet (file browsing + unauthenticated API). Add auth + path allowlisting + hardening first.
 
 ---
 
-### Arquitectura (hexagonal)
+## License
 
-Estructura: `domain` (models), `application` (casos d’ús/ports), `adapters` (infra: V4L2/ONNX/HTTP).
+MIT
+
+---
+
+---
+
+## CA — Català
+
+### Què és
+
+Aplicació en **Rust** amb arquitectura **hexagonal** (Domain + Application + Adapters) que:
+
+* Captura vídeo des de càmera **V4L2** (Linux).
+* Executa inferència **YOLO amb ONNX Runtime** (CPU o CUDA GPU si està disponible).
+* Serveix un **dashboard web** (UI estàtica) amb:
+
+  * streaming per **WebSocket** (JPEG + metadades JSON),
+  * configuració dinàmica de càmera i inferència,
+  * explorador d’arxius per seleccionar models `.onnx`.
+* (Opcional) Narra una descripció breu de l’escena amb **Ollama (moondream:latest)** i **Piper TTS**.
+
+### Arquitectura (Mermaid — compatible amb GitHub)
 
 ```mermaid
 flowchart LR
-  UI[Web UI (static/)] <-- WebSocket + REST --> HTTP[Axum HTTP Adapter]
-  HTTP --> APP[Application Services]
-  APP -->|ports| DOM[Domain]
-  APP --> V4L2[V4L2 Adapter]
-  APP --> ONNX[ONNX Adapter]
-  ONNX --> ORT[ONNX Runtime]
-  APP --> PIPE[Pipeline Worker]
-  PIPE --> SPEECH[SpeechService (opcional)]
-  SPEECH --> OLLAMA[Ollama (moondream)]
-  SPEECH --> PIPER[Piper TTS + aplay]
+  UI["Web UI (static/)"]
+  HTTP["Axum HTTP Adapter"]
+  APP["Application Services"]
+  DOM["Domain"]
+  V4L2["V4L2 Adapter"]
+  ONNX["ONNX Adapter"]
+  ORT["ONNX Runtime"]
+  PIPE["Pipeline Worker"]
+  SPEECH["SpeechService (optional)"]
+  OLLAMA["Ollama - moondream:latest"]
+  PIPER["Piper TTS + aplay"]
+
+  UI <--> |"REST + WS"| HTTP
+  HTTP --> APP
+  APP --> DOM
+  APP --> V4L2
+  APP --> ONNX
+  ONNX --> ORT
+  APP --> PIPE
+  PIPE --> SPEECH
+  SPEECH --> OLLAMA
+  SPEECH --> PIPER
 ```
 
 ---
 
-### Execució
+## Requisits
 
-```bash
-cargo build --release
-cargo run --release
-```
+### Sistema
 
-Obre:
+* Linux amb **V4L2** (`/dev/video*`).
+* `alsa-utils` (`aplay`) si vols veu.
+* Rust toolchain (stable).
 
-```text
-http://localhost:8090
-```
+### Dependències (via Cargo)
 
-Bind per defecte: `0.0.0.0:8090`. 
+* `axum`, `tower-http`, `v4l`, `ort`, `image`, `ndarray`, `reqwest`, `serde`
 
 ---
 
-## Models: què s’usa i com instal·lar-ho al host
+## Models: què s’utilitza i com instal·lar/baixar
 
-### 1) YOLO en ONNX
+### 1) Model YOLO ONNX (`.onnx`)
 
-Es requereixen fitxers `.onnx` (habitualment a `./models`) i es valida el model abans de configurar el pipeline.
-Configuració per defecte: `models/yolo11n.onnx`. 
-
-**Recomanat: exportar amb Ultralytics**. ([Ultralytics Docs][1])
+**Opció A — Exportar amb Ultralytics**
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -U ultralytics
+python3 -m pip install -U ultralytics
 yolo export model=yolo11n.pt format=onnx imgsz=640
-
-mkdir -p models
-mv yolo11n.onnx models/yolo11n.onnx
 ```
+
+**Opció B — Usar un `.onnx` ja exportat**
+
+* Desa el `.onnx` al disc i selecciona’l via UI (`/api/files`) o configuració (`/api/config`).
 
 ---
 
-### 2) Moondream a Ollama (opcional)
+### 2) VLM opcional: Ollama + `moondream:latest`
 
-El servei de veu crida `http://localhost:11434/api/generate` i usa `moondream:latest`.
-Instal·lació d’Ollama (oficial): ([Ollama Documentation][2])
+Instal·lació (Linux):
 
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
+```
+
+Servei:
+
+```bash
+ollama serve
+```
+
+Model:
+
+```bash
 ollama pull moondream:latest
 ```
 
 ---
 
-### 3) Piper TTS + veu (opcional)
+### 3) TTS opcional: Piper + `aplay`
 
-Executa `./piper_voice/piper/piper` amb el model `./piper_voice/en_US-lessac-medium.onnx` i reprodueix via `aplay`. 
-Exemples de descàrrega (Hugging Face): ([Hugging Face][3])
+Instal·la reproductor:
 
 ```bash
-mkdir -p piper_voice
-
-wget -O piper_voice/en_US-lessac-medium.onnx \
-  "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx"
-
-wget -O piper_voice/es_ES-sharvard-medium.onnx \
-  "https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_ES/sharvard/medium/es_ES-sharvard-medium.onnx"
-
-chmod +x piper_voice/piper/piper
+sudo apt-get update
+sudo apt-get install -y alsa-utils
 ```
 
-[1]: https://docs.ultralytics.com/modes/export/?utm_source=chatgpt.com "Model Export with Ultralytics YOLO"
-[2]: https://docs.ollama.com/linux?utm_source=chatgpt.com "Linux"
-[3]: https://huggingface.co/rhasspy/piper-voices/tree/main/en/en_US/lessac/medium?utm_source=chatgpt.com "rhasspy/piper-voices at main"
+Rutes esperades:
+
+* `./piper_voice/piper/piper`
+* `./piper_voice/en_US-lessac-medium.onnx`
+
+---
+
+## Execució
+
+```bash
+cargo build --release
+RUST_LOG=info cargo run --release
+```
+
+Per defecte: `http://localhost:8090`
+
+```
+
+### Referencias usadas (para que tengas trazabilidad, no es parte del README)
+- Rutas/puerto/configuración y dependencias: :contentReference[oaicite:0]{index=0} :contentReference[oaicite:1]{index=1} :contentReference[oaicite:2]{index=2} :contentReference[oaicite:3]{index=3}  
+- Ollama (instalación Linux y modelo moondream): :contentReference[oaicite:4]{index=4}  
+- Export ONNX con Ultralytics: :contentReference[oaicite:5]{index=5}  
+- Piper (binarios/releases) y `alsa-utils`: :contentReference[oaicite:6]{index=6}
+::contentReference[oaicite:7]{index=7}
+```
+
