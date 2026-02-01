@@ -3,6 +3,18 @@ name = "yolo_backend_hex"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Por defecto evitamos CUDA para que compile en más entornos.
+# El backend descarga binarios de ONNX Runtime automáticamente.
+default = ["ort-download-binaries"]
+
+# Descarga automática de binarios ONNX Runtime vía `ort`.
+ort-download-binaries = ["ort/download-binaries", "ort/copy-dylibs", "ort/tls-native"]
+
+# Habilitar CUDA (requiere toolchain/librerías CUDA en el host)
+# Uso: cargo run --features cuda
+cuda = ["ort/cuda"]
+
 [dependencies]
 anyhow = "1"
 thiserror = "2"
@@ -23,6 +35,8 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 ndarray = "0.15"
 
 v4l = "0.14"
-ort = { version = "2.0.0-rc.11", features = ["ndarray", "download-binaries", "cuda"] }
+# CUDA no se activa por defecto; se habilita con --features cuda.
+# download-binaries/copy-dylibs se habilitan con la feature ort-download-binaries.
+ort = { version = "2.0.0-rc.11", default-features = false, features = ["ndarray", "tracing"] }
 async-trait = "0.1"
 reqwest = { version = "0.12", features = ["json", "blocking"] }

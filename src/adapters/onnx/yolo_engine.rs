@@ -1,27 +1,32 @@
 use anyhow::Result;
 use image::{imageops::FilterType, RgbImage};
-use ndarray::{Array4, Axis, ArrayViewD, s, IxDyn}; // Añadido IxDyn
+use ndarray::{s, Array4, ArrayViewD, Axis, IxDyn};
+use ort::execution_providers::CUDAExecutionProvider;
 use ort::session::Session;
 use ort::value::Value;
-use ort::execution_providers::CUDAExecutionProvider;
+use std::fs;
 
 use crate::domain::detection::Detection;
 use crate::domain::model::YoloParams;
 
-pub struct OnnxYoloEngine { session: Session }
+pub struct OnnxYoloEngine {
+    session: Session,
+}
 
 impl OnnxYoloEngine {
     pub fn load(path: &str) -> Result<Self> {
         let mut builder = Session::builder()?.with_intra_threads(4)?;
 
-        // En ort 2.0-rc.11, build() devuelve el provider directamente.
-        // Intentamos registrar CUDA si está disponible.
+        // CUDA es opcional: si está disponible se registra, si no continuamos en CPU.
         let cuda = CUDAExecutionProvider::default().build();
         if let Ok(builder_with_cuda) = builder.clone().with_execution_providers([cuda]) {
             builder = builder_with_cuda;
         }
 
-        let session = builder.commit_from_file(path)?;
+        // Con `ort` sin default-features, usamos commit_from_memory.
+        let model_bytes = fs::read(path)?;
+        let session = builder.commit_from_memory(&model_bytes)?;
+
         Ok(Self { session })
     }
 
@@ -41,7 +46,7 @@ impl OnnxYoloEngine {
 
         let imgsz = params.input_size as usize;
         let resized = image::imageops::resize(rgb, imgsz as u32, imgsz as u32, FilterType::Nearest);
-        
+
         let mut input = Array4::<f32>::zeros((1, 3, imgsz, imgsz));
         for (x, y, pixel) in resized.enumerate_pixels() {
             input[[0, 0, y as usize, x as usize]] = pixel[0] as f32 / 255.0;
@@ -49,19 +54,17 @@ impl OnnxYoloEngine {
             input[[0, 2, y as usize, x as usize]] = pixel[2] as f32 / 255.0;
         }
 
-        // Forma segura de crear el tensor evitando conflictos de versiones de ndarray
         let input_shape = vec![1, 3, imgsz as i64, imgsz as i64];
         let input_tensor = Value::from_array((input_shape, input.into_raw_vec()))?;
-        
+
         let outputs = self.session.run(ort::inputs![input_tensor])?;
         let (shape_out, data_out) = outputs[0].try_extract_tensor::<f32>()?;
-        
-        // Convertimos la forma de ort a IxDyn de ndarray explícitamente
+
         let dims: Vec<usize> = shape_out.into_iter().map(|&x| x as usize).collect();
         let array_view = ArrayViewD::from_shape(IxDyn(&dims), data_out)?;
-        let view = array_view.index_axis(Axis(0), 0); 
+        let view = array_view.index_axis(Axis(0), 0);
 
-        let num_candidates = view.shape()[1]; 
+        let num_candidates = view.shape()[1];
         let sx = rgb.width() as f32 / imgsz as f32;
         let sy = rgb.height() as f32 / imgsz as f32;
 
@@ -81,10 +84,10 @@ impl OnnxYoloEngine {
                 let h = view[[3, i]];
 
                 detections.push(Detection {
-                    x1: (cx - w/2.0) * sx,
-                    y1: (cy - h/2.0) * sy,
-                    x2: (cx + w/2.0) * sx,
-                    y2: (cy + h/2.0) * sy,
+                    x1: (cx - w / 2.0) * sx,
+                    y1: (cy - h / 2.0) * sy,
+                    x2: (cx + w / 2.0) * sx,
+                    y2: (cy + h / 2.0) * sy,
                     score: max_score,
                     class_id,
                     label: classes.get(class_id).unwrap_or(&"objeto").to_string(),

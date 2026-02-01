@@ -6,7 +6,7 @@ use crate::{
     domain::{
         camera::{CameraControl, CameraId, CameraInfo, CameraMode, FrameSize, PixelFormat, SetControl},
         errors::DomainResult,
-        model::{InferenceConfig, ModelId},
+        model::InferenceConfig,
         stream::FrameMeta,
     },
 };
@@ -32,7 +32,11 @@ impl CameraService {
         self.catalog.list_formats(&camera).await
     }
 
-    pub async fn list_frame_sizes(&self, camera: CameraId, fourcc: String) -> DomainResult<Vec<FrameSize>> {
+    pub async fn list_frame_sizes(
+        &self,
+        camera: CameraId,
+        fourcc: String,
+    ) -> DomainResult<Vec<FrameSize>> {
         self.catalog.list_frame_sizes(&camera, &fourcc).await
     }
 
@@ -45,25 +49,7 @@ impl CameraService {
     }
 }
 
-/// Servicio encargado de la validación y gestión de modelos ONNX.
-#[derive(Clone)]
-pub struct ModelService {
-    catalog: Arc<dyn ModelCatalogPort>,
-}
-
-impl ModelService {
-    pub fn new(catalog: Arc<dyn ModelCatalogPort>) -> Self {
-        Self { catalog }
-    }
-
-    /// Valida que el archivo del modelo exista y sea accesible.
-    pub async fn validate(&self, model: ModelId) -> DomainResult<()> {
-        self.catalog.validate_model(&model).await
-    }
-}
-
-/// El Orquestador del Pipeline.
-/// Conecta el flujo de la cámara con el motor de inferencia YOLO.
+/// Orquestador del pipeline (captura + inferencia).
 #[derive(Clone)]
 pub struct PipelineService {
     stream: Arc<dyn StreamPort>,
@@ -72,7 +58,10 @@ pub struct PipelineService {
 
 impl PipelineService {
     pub fn new(stream: Arc<dyn StreamPort>, model_catalog: Arc<dyn ModelCatalogPort>) -> Self {
-        Self { stream, model_catalog }
+        Self {
+            stream,
+            model_catalog,
+        }
     }
 
     /// Configura el pipeline completo.
@@ -85,7 +74,7 @@ impl PipelineService {
     ) -> DomainResult<()> {
         // Validación preventiva antes de arrancar el hardware
         self.model_catalog.validate_model(&infer.model).await?;
-        
+
         // Delegar la configuración al adaptador de stream (PipelineAdapter)
         self.stream.configure(camera, mode, infer).await
     }

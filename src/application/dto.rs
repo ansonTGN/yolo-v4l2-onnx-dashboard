@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    camera::{CameraControl, CameraId, CameraInfo, CameraMode, PixelFormat, SetControl},
+    camera::{CameraId, CameraMode},
     model::{InferenceConfig, ModelId, YoloParams},
 };
 
@@ -20,17 +20,14 @@ impl From<SetModeRequest> for (CameraId, CameraMode) {
             CameraId { path: r.camera_path },
             CameraMode {
                 format: r.fourcc,
-                size: crate::domain::camera::FrameSize { width: r.width, height: r.height },
+                size: crate::domain::camera::FrameSize {
+                    width: r.width,
+                    height: r.height,
+                },
                 fps: r.fps,
             },
         )
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SetControlsRequest {
-    pub camera_path: String,
-    pub values: Vec<SetControl>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,33 +48,19 @@ impl From<ConfigurePipelineRequest> for (CameraId, CameraMode, InferenceConfig) 
         let cam = CameraId { path: r.camera_path };
         let mode = CameraMode {
             format: r.fourcc,
-            size: crate::domain::camera::FrameSize { width: r.width, height: r.height },
+            size: crate::domain::camera::FrameSize {
+                width: r.width,
+                height: r.height,
+            },
             fps: r.fps,
         };
         let infer = InferenceConfig {
-            model: ModelId { name: r.model_name, onnx_path: r.onnx_path },
+            model: ModelId {
+                name: r.model_name,
+                onnx_path: r.onnx_path,
+            },
             params: r.yolo,
         };
         (cam, mode, infer)
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CamerasResponse {
-    pub cameras: Vec<CameraInfo>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FormatsResponse {
-    pub formats: Vec<PixelFormat>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ControlsResponse {
-    pub controls: Vec<CameraControl>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OkResponse {
-    pub ok: bool,
 }

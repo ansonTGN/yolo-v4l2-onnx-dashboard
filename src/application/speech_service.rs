@@ -1,12 +1,15 @@
+use std::io::Write;
 use std::process::{Command, Stdio};
-use std::io::{Write, Cursor};
-use std::time::{Instant, Duration};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
 use base64::{prelude::BASE64_STANDARD, Engine};
 use image::ImageFormat;
-use crate::domain::detection::Detection;
 use serde_json::json;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
+
+use crate::domain::detection::Detection;
+use crate::domain::stream::summarize_detections;
 
 pub struct SpeechService {
     last_spoken: Arc<Mutex<Instant>>,
@@ -21,7 +24,7 @@ pub struct SpeechService {
 impl SpeechService {
     pub fn new(interval_secs: u64, handle: tokio::runtime::Handle) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(45)) 
+            .timeout(Duration::from_secs(45))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -29,7 +32,7 @@ impl SpeechService {
             last_spoken: Arc::new(Mutex::new(Instant::now() - Duration::from_secs(interval_secs))),
             min_interval: Duration::from_secs(interval_secs),
             client,
-            ollama_url: "http://localhost:11434".to_string(), 
+            ollama_url: "http://localhost:11434".to_string(),
             model_name: "moondream:latest".to_string(),
             tokio_handle: handle,
             is_ready: Arc::new(Mutex::new(false)),
@@ -82,10 +85,9 @@ impl SpeechService {
         let model = self.model_name.clone();
 
         self.tokio_handle.spawn(async move {
-            // MEJORA: Calidad de imagen superior para que el modelo "vea" mejor
             let optimized_base64 = tokio::task::spawn_blocking(move || {
                 if let Ok(img) = image::load_from_memory_with_format(&image_data, ImageFormat::Jpeg) {
-                    let scaled = img.thumbnail(640, 640); // 640px es el estándar de YOLO y Moondream
+                    let scaled = img.thumbnail(640, 640);
                     let mut buf = Vec::new();
                     let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 80);
                     if encoder.encode_image(&scaled).is_ok() {
@@ -93,19 +95,33 @@ impl SpeechService {
                     }
                 }
                 None
-            }).await.ok().flatten();
+            })
+            .await
+            .ok()
+            .flatten();
 
-            let Some(base64_image) = optimized_base64 else { return; };
+            let Some(base64_image) = optimized_base64 else {
+                return;
+            };
+
+            let det_summary = summarize_detections(&detections);
+            let prompt = if det_summary.is_empty() {
+                "Describe this image in one short sentence.".to_string()
+            } else {
+                format!(
+                    "Describe this image in one short sentence. Focus on: {}",
+                    det_summary
+                )
+            };
 
             info!("🔍 Analyzing scene...");
 
-            // Prompt simplificado: Moondream responde mejor a instrucciones directas
-            let body = json!({ 
-                "model": model, 
-                "prompt": "Describe this image in one short sentence.", 
+            let body = json!({
+                "model": model,
+                "prompt": prompt,
                 "images": [base64_image],
                 "stream": false,
-                "options": { 
+                "options": {
                     "temperature": 0.0,
                     "num_predict": 30
                 }
@@ -116,11 +132,11 @@ impl SpeechService {
                     let status = res.status();
                     if let Ok(json_resp) = res.json::<serde_json::Value>().await {
                         if let Some(text) = json_resp["response"].as_str() {
-                            let clean_text = text.trim().replace("\"", "");
+                            let clean_text = text.trim().replace('"', "");
                             if !clean_text.is_empty() && clean_text.len() > 5 {
                                 speak_with_piper(&clean_text);
                             } else {
-                                warn!("⚠️ Ollama returned empty or very short response: {:?}", json_resp);
+                                warn!("⚠️ Ollama returned empty/short response: {:?}", json_resp);
                             }
                         } else {
                             error!("❌ Unexpected JSON format from Ollama: {:?}", json_resp);
@@ -128,7 +144,7 @@ impl SpeechService {
                     } else {
                         error!("❌ Failed to parse Ollama JSON response. Status: {}", status);
                     }
-                },
+                }
                 Err(e) => error!("❌ Ollama Error: {}", e),
             }
         });
@@ -141,7 +157,7 @@ fn speak_with_piper(text: &str) {
 
     std::thread::spawn(move || {
         let piper_path = "./piper_voice/piper/piper";
-        let model_path = "./piper_voice/en_US-lessac-medium.onnx"; 
+        let model_path = "./piper_voice/en_US-lessac-medium.onnx";
 
         if !std::path::Path::new(model_path).exists() {
             error!("❌ VOICE MODEL NOT FOUND: {}", model_path);
@@ -150,14 +166,16 @@ fn speak_with_piper(text: &str) {
 
         let mut piper = match Command::new(piper_path)
             .args(["--model", model_path, "--output_raw"])
-            .stdin(Stdio::piped()).stdout(Stdio::piped())
-            .spawn() {
-                Ok(p) => p,
-                Err(e) => {
-                    error!("❌ Failed to start Piper: {}", e);
-                    return;
-                }
-            };
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+        {
+            Ok(p) => p,
+            Err(e) => {
+                error!("❌ Failed to start Piper: {}", e);
+                return;
+            }
+        };
 
         if let Some(mut stdin) = piper.stdin.take() {
             let _ = stdin.write_all(text.as_bytes());
@@ -167,7 +185,8 @@ fn speak_with_piper(text: &str) {
         if let Some(stdout) = piper.stdout.take() {
             let _ = Command::new("aplay")
                 .args(["-r", "22050", "-f", "S16_LE", "-t", "raw"])
-                .stdin(stdout).spawn();
+                .stdin(stdout)
+                .spawn();
         }
     });
 }
